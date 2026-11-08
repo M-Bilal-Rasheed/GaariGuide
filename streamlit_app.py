@@ -68,6 +68,30 @@ def finish_now():
     ss.finished = True
 
 
+def quit_app():
+    """Leave the consultation and return to the landing screen."""
+    ss.answers = []
+    ss.finished = False
+    ss.started = False
+
+
+@st.dialog("Quit consultation?")
+def quit_dialog():
+    st.write("Your answers will be cleared and you will return to the start screen.")
+    c1, c2 = st.columns(2)
+    if c1.button("Cancel", key="quit_cancel", width="stretch"):
+        st.rerun()
+    if c2.button("Quit", key="quit_confirm", type="primary", width="stretch"):
+        quit_app()
+        st.rerun()
+
+
+def quit_button():
+    """Small 'Quit' control pinned to the top-right corner of every screen after Start."""
+    if st.button("✕  Quit", key="quit_btn", type="tertiary"):
+        quit_dialog()
+
+
 def motion(token: str = "", confetti: bool = False):
     """Load ui/motion.js into the main page once; optionally fire confetti."""
     js = (UI_DIR / "motion.js").read_text(encoding="utf-8")
@@ -209,6 +233,7 @@ def landing():
 
 # =================================================================== QUIZ ===
 def question_screen(state, q, why):
+    quit_button()
     total = len(CARS)
     prev_alive = len(app.run(ss.answers[:-1]).alive) if ss.answers else total
     pct = lambda alive: round(100 * (1 - (alive - 1) / (total - 1)))  # noqa: E731
@@ -247,6 +272,7 @@ def question_screen(state, q, why):
 
 # ================================================================= RESULT ===
 def result_screen(state, reason):
+    quit_button()
     top = app.recommendation(state, 3)
     best, best_match, _ = top[0]
     specs = car_specs(best)

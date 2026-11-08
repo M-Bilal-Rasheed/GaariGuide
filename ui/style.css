@@ -314,3 +314,15 @@ div[role="dialog"] { background: #0f1118 !important; border: 1px solid var(--lin
 
 /* the <style> carrier itself takes no space */
 .stElementContainer:has(style) { display: none !important; }
+
+/* Quit control - pinned top-right on every screen after Start */
+.st-key-quit_btn {
+  position: fixed !important; top: 22px; right: 26px; z-index: 1000; width: auto !important;
+  animation: gg-fade .6s ease .3s both;
+}
+.st-key-quit_btn button {
+  background: var(--surface) !important; border: 1px solid var(--line) !important; border-radius: 999px !important;
+  padding: .45rem 1rem !important; backdrop-filter: blur(8px);
+}
+.st-key-quit_btn button:hover { border-color: rgba(255, 77, 94, .5) !important; color: var(--ink) !important; }
+@media (max-width: 640px) { .st-key-quit_btn { top: 12px; right: 12px; } }

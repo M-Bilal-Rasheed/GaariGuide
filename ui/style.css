@@ -326,3 +326,19 @@ div[role="dialog"] { background: #0f1118 !important; border: 1px solid var(--lin
 }
 .st-key-quit_btn button:hover { border-color: rgba(255, 77, 94, .5) !important; color: var(--ink) !important; }
 @media (max-width: 640px) { .st-key-quit_btn { top: 12px; right: 12px; } }
+
+/* ---------------- diagnosis card ---------------- */
+.gg-diag { max-width: 720px; margin: 0 auto 1rem; padding: 1.4rem 1.6rem; border-radius: 18px;
+  background: var(--surface); border: 1px solid var(--line); animation: gg-rise .7s .2s both; }
+.gg-diag-label { color: var(--faint); font-size: .74rem; font-weight: 700; letter-spacing: .08em;
+  text-transform: uppercase; margin: 1.1rem 0 .5rem; }
+.gg-diag-label:first-child { margin-top: 0; }
+.gg-diag-type { font-size: 1.45rem; font-weight: 800; background: var(--grad); -webkit-background-clip: text;
+  background-clip: text; color: transparent; display: inline-block; }
+.gg-diag-text { color: var(--muted); margin-top: .25rem; }
+.gg-chips.left { justify-content: flex-start; margin: 0; }
+.gg-diag-conf { margin: 0; padding-left: 1.2rem; color: var(--muted); }
+.gg-diag-conf li { margin: .3rem 0; }
+.gg-diag-conf li::marker { color: var(--accent-2); }
+.gg-diag-conf li.none { list-style: none; margin-left: -1.2rem; }
+@media (max-width: 640px) { .gg-diag { padding: 1.1rem; } .gg-diag-type { font-size: 1.2rem; } }

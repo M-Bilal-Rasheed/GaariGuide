@@ -2,7 +2,7 @@
 GaariGuide - a car recommendation expert system for the Pakistani market.
 User interface (Streamlit). Run with:  streamlit run streamlit_app.py
 
-All reasoning lives in app.py (inference engine) and knowledge_base/.
+All reasoning lives in app.py (inference engine) and knowledge.py (cars, questions, rules).
 This file only draws the single-page experience:
     landing  ->  questions (animated)  ->  recommendation (+ decision support)
 Styling is in ui/style.css and the exit/confetti animations in ui/motion.js.
@@ -18,8 +18,7 @@ import streamlit as st
 import streamlit.components.v1 as components
 
 import app
-from knowledge_base.cars import CARS
-from knowledge_base.rules import QUESTIONS, QUESTIONS_BY_ID, RULES, SKIP
+from knowledge import CARS, QUESTIONS, QUESTIONS_BY_ID, RULES, RULES_BY_QUESTION, SKIP
 
 UI_DIR = Path(__file__).parent / "ui"
 
@@ -152,7 +151,11 @@ def cap(text: str) -> str:
 
 
 def build_report(state, reason, top) -> str:
+    diag = app.diagnose(state)
     lines = ["GaariGuide - Car Recommendation Report", "=" * 40, "",
+             f"Diagnosis: {diag['profile'][1]} - {diag['profile'][2]}",
+             "Key needs: " + (", ".join(t for _, t in diag["needs"]) or "none"),
+             "Conflicts: " + (" | ".join(t for _, t in diag["conflicts"]) or "none"), "",
              f"Decision: {top[0][0].name} ({top[0][1]:.0f}% match, {fmt_price(top[0][0].price)})",
              f"Reason: {reason}", "", "Alternatives:"]
     lines += [f"  {i}. {c.name} - {m:.0f}% match, {fmt_price(c.price)}" for i, (c, m, _) in enumerate(top[1:], 2)]
@@ -172,7 +175,7 @@ def build_report(state, reason, top) -> str:
 def knowledge_dialog():
     a, b, c, d = st.columns(4)
     a.metric("Questions", len(QUESTIONS))
-    b.metric("Rules (IF-THEN)", len(RULES))
+    b.metric("Rules (if / else)", len(RULES))
     c.metric("Hard rules", sum(r.kind == "require" for r in RULES))
     d.metric("Cars (facts)", len(CARS))
     t1, t2, t3 = st.tabs(["Rules", "Questions", "Cars"])
@@ -188,7 +191,7 @@ def knowledge_dialog():
     with t2:
         rows = [{"#": i + 1, "Category": q.category, "Question": q.text,
                  "Options": ", ".join(lbl for _, lbl in q.options),
-                 "Rules": len(app.RULES_BY_QUESTION.get(q.id, []))} for i, q in enumerate(QUESTIONS)]
+                 "Rules": len(RULES_BY_QUESTION.get(q.id, []))} for i, q in enumerate(QUESTIONS)]
         st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch", height=460)
     with t3:
         st.dataframe(pd.DataFrame([car_specs(c) for c in CARS]), hide_index=True, width="stretch", height=460)
@@ -237,7 +240,9 @@ def question_screen(state, q, why):
     total = len(CARS)
     prev_alive = len(app.run(ss.answers[:-1]).alive) if ss.answers else total
     pct = lambda alive: round(100 * (1 - (alive - 1) / (total - 1)))  # noqa: E731
-    raw(f"""
+    # A new keyed container per question, so the faded-out block is replaced (not reused) on Next.
+    with st.container(key=f"meta_q{state.asked}"):
+        raw(f"""
     <div class="gg-meta">
       <div class="gg-step">Question {state.asked + 1} <em>· {esc(q.category)}</em></div>
       <div class="gg-track"><div style="--from:{pct(prev_alive)};--to:{pct(len(state.alive))}"></div></div>
@@ -321,6 +326,26 @@ def result_screen(state, reason):
             st.download_button("Download report", data=build_report(state, reason, top),
                                file_name="GaariGuide_report.txt", mime="text/plain")
             st.button("←  Back one question", key="go_back_result", type="tertiary", on_click=go_back)
+
+        # ---- DIAGNOSIS ----
+        diag = app.diagnose(state)
+        _, p_name, p_text = diag["profile"]
+        needs = "".join(f"<span class='gg-chip ok'>{esc(t)}</span>" for _, t in diag["needs"]) \
+            or "<span class='gg-chip'>No single strong need</span>"
+        conflicts = "".join(f"<li>{esc(t)}</li>" for _, t in diag["conflicts"]) \
+            or "<li class='none'>None: your requirements fit together.</li>"
+        raw(f"""
+        <div class="gg-h">Diagnosis</div>
+        <div class="gg-hsub">What the expert concluded about you from your answers.</div>
+        <div class="gg-diag">
+          <div class="gg-diag-label">Buyer type</div>
+          <div class="gg-diag-type">{esc(p_name)}</div>
+          <div class="gg-diag-text">{esc(p_text)}</div>
+          <div class="gg-diag-label">Key needs</div>
+          <div class="gg-chips left">{needs}</div>
+          <div class="gg-diag-label">Conflicts found</div>
+          <ul class="gg-diag-conf">{conflicts}</ul>
+        </div>""")
 
         # ---- DECISION SUPPORT ----
         raw("<div class='gg-h'>Explore the decision</div>"

@@ -4,15 +4,18 @@ INFERENCE ENGINE of GaariGuide.
 Forward chaining with candidate elimination + scoring:
 
   1. Start with every car in the fact base as a candidate.
-  2. For each answer, FIRE every rule of that question whose answer matches:
-       - REQUIRE rule -> eliminate cars that fail the condition
-                         (if it would eliminate ALL cars, the rule is
-                          relaxed into a penalty instead: conflict resolution)
-       - SCORE rule   -> add / subtract points to the cars that match
+  2. For each answer, FIRE the rules of that question (check_rules in
+     knowledge.py) on every car that is still possible:
+       - "drop"  -> the car fails an eliminate rule and is removed
+                    (if a rule would remove ALL cars, it becomes a -3 penalty
+                     instead: conflict resolution)
+       - "keep"  -> the car passes an eliminate rule (+2 points)
+       - +N / -N -> score points for the car
   3. Choose the NEXT question dynamically: the one that best separates
      the leading candidates (questions that cannot change anything are skipped).
   4. STOP as soon as the answer is clear (one car left, or a confident
      leader), otherwise keep asking - there is no fixed question count.
+  5. DIAGNOSE the buyer (type, needs, conflicting requirements).
 
 The engine is a pure function of the answers given so far, so going
 "back" or changing an answer simply re-runs it.
@@ -20,17 +23,16 @@ The engine is a pure function of the answers given so far, so going
 
 from dataclasses import dataclass, field
 
-from knowledge_base.cars import CARS, CAR_BY_NAME, Car
-from knowledge_base.rules import (CORE_ORDER, QUESTIONS, QUESTIONS_BY_ID, RULES_BY_QUESTION, SKIP,
-                                  Question, Rule)
+from knowledge import (CAR_BY_NAME, CARS, CORE_ORDER, QUESTIONS, QUESTIONS_BY_ID, SKIP,
+                       check_rules, diagnose_buyer, is_relevant, rules_for)
 
 # ---- tuning knobs ----------------------------------------------------------
 # Stopping tiers: (min questions asked, min match % of leader, min point lead over #2).
 # The longer the consultation, the less certainty is needed to decide, so a
 # clear user finishes in ~10-15 questions and an unsure user is asked more.
 STOP_TIERS = [(10, 75, 5), (15, 70, 1), (20, 70, 0), (25, 0, 0)]
-MIN_QUESTIONS = STOP_TIERS[0][0]   # never decide earlier unless only one car is left
-REQUIRE_BONUS = 2        # points a car earns for passing a hard requirement
+MIN_QUESTIONS = 10       # never decide earlier unless only one car is left
+REQUIRE_BONUS = 2        # points a car earns for passing an eliminate rule
 TOP_K = 5                # how many leading cars the question selector looks at
 ELIMINATED = -10         # effect value used when simulating an elimination
 
@@ -40,81 +42,84 @@ class Firing:
     """One rule that fired during a consultation (for the explanation facility)."""
     step: int
     qid: str
-    rule: Rule
+    rule: object          # the Rule (id, condition text ...)
     cars: list            # names of cars the rule affected
-    effect: str           # "eliminated" | "passed" | "+3" | "-2" | "relaxed"
+    effect: str           # "eliminated" | "relaxed" | "+3" | "-2"
 
 
 @dataclass
 class State:
-    answers: dict = field(default_factory=dict)            # qid -> option key
-    order: list = field(default_factory=list)              # qids in the order asked
+    """Working memory: everything the expert knows so far."""
+    answers: dict = field(default_factory=dict)            # question -> answer
+    order: list = field(default_factory=list)              # questions in the order asked
     alive: list = field(default_factory=lambda: [c.name for c in CARS])
-    eliminated: dict = field(default_factory=dict)         # car -> (step, qid, Rule)
+    eliminated: dict = field(default_factory=dict)         # car -> (step, question, Rule)
     earned: dict = field(default_factory=lambda: {c.name: 0.0 for c in CARS})
     max_points: float = 0.0
     firings: list = field(default_factory=list)
     reasons: dict = field(default_factory=lambda: {c.name: [] for c in CARS})  # car -> [(Rule, pts)]
-    relaxed: list = field(default_factory=list)            # Rules that had to be relaxed
+    relaxed: list = field(default_factory=list)            # rules that had to be relaxed
 
-    # ---- derived views ---------------------------------------------------
-    def match(self, name: str) -> float:
+    def match(self, name):
         """Match percentage of a car: points earned / points possible."""
         if self.max_points <= 0:
             return 0.0
         return max(0.0, min(100.0, 100.0 * self.earned[name] / self.max_points))
 
-    def ranking(self) -> list:
-        """Alive cars, best first (ties broken by resale value, then lower price)."""
+    def ranking(self):
+        """Cars still possible, best first (ties broken by resale value, then lower price)."""
         return sorted(self.alive, key=lambda n: (-self.earned[n], -CAR_BY_NAME[n].resale, CAR_BY_NAME[n].price))
 
     @property
-    def asked(self) -> int:
+    def asked(self):
         return len(self.order)
 
 
 # ---------------------------------------------------------------------------
-# 1. Rule firing
+# 1. Rule firing (forward chaining)
 # ---------------------------------------------------------------------------
-def matching_rules(qid: str, answer: str) -> list:
-    if answer == SKIP:
-        return []
-    return [r for r in RULES_BY_QUESTION.get(qid, []) if answer in r.answers]
-
-
-def apply_answer(state: State, qid: str, answer: str) -> None:
-    """Fire every rule triggered by this answer (forward chaining)."""
+def apply_answer(state, qid, answer):
+    """Fire every rule of this answer on the cars that are still possible."""
     step = len(state.order) + 1
     state.answers[qid] = answer
     state.order.append(qid)
+    if answer == SKIP:
+        return
 
-    for rule in matching_rules(qid, answer):
-        cars = [CAR_BY_NAME[n] for n in state.alive]
+    # Ask the knowledge base what each rule says about each car.
+    results = {}                                   # car -> {rule id: effect}
+    for name in state.alive:
+        results[name] = {}
+        for rule_id, effect, _ in check_rules(qid, answer, CAR_BY_NAME[name]):
+            results[name][rule_id] = effect
+
+    for rule in rules_for(qid, answer):
+        cars = list(state.alive)
         if rule.kind == "require":
-            passing = [c.name for c in cars if rule.test(c)]
-            failing = [c.name for c in cars if not rule.test(c)]
             state.max_points += REQUIRE_BONUS
+            passing = [n for n in cars if results[n].get(rule.id) == "keep"]
+            failing = [n for n in cars if results[n].get(rule.id) == "drop"]
             if not passing:
-                # Conflict resolution: nothing left would satisfy this rule,
-                # so treat it as a strong preference instead of a hard filter.
+                # Conflict resolution: no car left can satisfy this rule,
+                # so it becomes a strong preference instead of a hard filter.
                 state.relaxed.append(rule)
                 for n in failing:
                     state.earned[n] -= 3
                     state.reasons[n].append((rule, -3))
                 state.firings.append(Firing(step, qid, rule, failing, "relaxed"))
-                continue
-            for n in failing:
-                state.alive.remove(n)
-                state.eliminated[n] = (step, qid, rule)
-            for n in passing:
-                state.earned[n] += REQUIRE_BONUS
-                state.reasons[n].append((rule, REQUIRE_BONUS))
-            if failing:
-                state.firings.append(Firing(step, qid, rule, failing, "eliminated"))
+            else:
+                for n in failing:
+                    state.alive.remove(n)
+                    state.eliminated[n] = (step, qid, rule)
+                for n in passing:
+                    state.earned[n] += REQUIRE_BONUS
+                    state.reasons[n].append((rule, REQUIRE_BONUS))
+                if failing:
+                    state.firings.append(Firing(step, qid, rule, failing, "eliminated"))
         else:
             if rule.points > 0:
                 state.max_points += rule.points
-            hit = [c.name for c in cars if rule.test(c)]
+            hit = [n for n in cars if rule.id in results[n]]
             for n in hit:
                 state.earned[n] += rule.points
                 state.reasons[n].append((rule, rule.points))
@@ -123,8 +128,8 @@ def apply_answer(state: State, qid: str, answer: str) -> None:
                 state.firings.append(Firing(step, qid, rule, hit, f"{sign}{rule.points}"))
 
 
-def run(answers: list) -> State:
-    """Replay a whole consultation. `answers` is a list of (qid, option_key)."""
+def run(answers):
+    """Replay a whole consultation. `answers` is a list of (question, answer)."""
     state = State()
     for qid, ans in answers:
         apply_answer(state, qid, ans)
@@ -134,20 +139,20 @@ def run(answers: list) -> State:
 # ---------------------------------------------------------------------------
 # 2. Choosing the next question
 # ---------------------------------------------------------------------------
-def option_effect(qid: str, option: str, car: Car) -> float:
+def option_effect(qid, option, car):
     """What would this answer do to this car? (ELIMINATED or net points)."""
-    total = 0.0
-    for rule in matching_rules(qid, option):
-        if rule.kind == "require":
-            if not rule.test(car):
-                return ELIMINATED
+    total = 0
+    for _, effect, _ in check_rules(qid, option, car):
+        if effect == "drop":
+            return ELIMINATED
+        elif effect == "keep":
             total += REQUIRE_BONUS
-        elif rule.test(car):
-            total += rule.points
+        else:
+            total += effect
     return total
 
 
-def discrimination(q: Question, names: list) -> float:
+def discrimination(q, names):
     """How well a question separates these cars.
 
     For each option we measure the spread of its effect on the cars; the
@@ -164,19 +169,22 @@ def discrimination(q: Question, names: list) -> float:
     return (sum(spreads) / len(spreads) + max(spreads)) / 2
 
 
-def leaders(state: State) -> list:
+def leaders(state):
     """The leader plus every car within 1 point of it (at least two cars)."""
     ranking = state.ranking()
     best = state.earned[ranking[0]]
     group = [n for n in ranking if state.earned[n] >= best - 1]
-    return group if len(group) >= 2 else ranking[:2]
+    if len(group) >= 2:
+        return group
+    return ranking[:2]
 
 
-def available(q: Question, state: State) -> bool:
-    return q.id not in state.answers and (q.depends is None or q.depends(state.answers))
+def available(q, state):
+    """Not asked yet, and it makes sense after the earlier answers."""
+    return q.id not in state.answers and is_relevant(q.id, state.answers)
 
 
-def next_question(state: State):
+def next_question(state):
     """Return (Question, why_text) or (None, None) when nothing useful is left."""
     ranking = state.ranking()
     candidates = [q for q in QUESTIONS if available(q, state)]
@@ -209,9 +217,9 @@ def next_question(state: State):
 
 
 # ---------------------------------------------------------------------------
-# 3. Stopping (is the answer clear yet?)
+# 3. Stopping (is the answer clear yet?) - the DECISION
 # ---------------------------------------------------------------------------
-def should_stop(state: State):
+def should_stop(state):
     """Return (stop?, reason)."""
     ranking = state.ranking()
     if len(ranking) == 1:
@@ -234,7 +242,7 @@ def should_stop(state: State):
     return False, ""
 
 
-def winner_can_change(state: State) -> bool:
+def winner_can_change(state):
     """Could any single remaining answer put a different car in first place?"""
     ranking = state.ranking()
     leader = CAR_BY_NAME[ranking[0]]
@@ -256,9 +264,9 @@ def winner_can_change(state: State) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# 4. Explanation facility helpers (decision support)
+# 4. Explanations (decision support) and diagnosis
 # ---------------------------------------------------------------------------
-def explain_car(state: State, name: str):
+def explain_car(state, name):
     """Positive and negative reasons for a car, strongest first."""
     pros = [(r, p) for r, p in state.reasons[name] if p > 0]
     cons = [(r, p) for r, p in state.reasons[name] if p < 0]
@@ -267,6 +275,15 @@ def explain_car(state: State, name: str):
     return pros, cons
 
 
-def recommendation(state: State, top_n: int = 3) -> list:
+def diagnose(state):
+    """DIAGNOSIS: the buyer's type, needs and conflicts, found from the answers."""
+    profile, needs, conflicts = diagnose_buyer(state.answers)
+    # Conflicts the engine found itself: eliminate rules no remaining car could meet.
+    for r in state.relaxed:
+        conflicts.append((r.id, f"No car left meets this rule, so it became a -3 penalty: {r.describe()}."))
+    return {"profile": profile, "needs": needs, "conflicts": conflicts}
+
+
+def recommendation(state, top_n=3):
     """Top N cars as (Car, match %, points)."""
     return [(CAR_BY_NAME[n], state.match(n), state.earned[n]) for n in state.ranking()[:top_n]]

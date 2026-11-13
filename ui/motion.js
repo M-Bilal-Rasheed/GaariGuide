@@ -35,6 +35,7 @@
       // safety net: if Streamlit keeps the same elements, show them again
       setTimeout(function () {
         stages.forEach(function (el) { if (el.isConnected) el.classList.remove('gg-out'); });
+        document.querySelectorAll('.gg-meta-out').forEach(function (el) { el.classList.remove('gg-meta-out'); });
       }, 4000);
     }, EXIT_MS);
   }, true);
